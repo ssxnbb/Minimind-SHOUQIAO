@@ -3,6 +3,7 @@ from transformers import PretrainedConfig
 from typing import Optional,Tuple
 import math
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 class MokioMindConfig(PretrainedConfig):
     model_type = "mokiomind"
 
@@ -170,6 +171,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         # reshape是直接修改张量的维度
         .reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
     )
+# 5.attention机制
 class Attention(nn.Module):
     def __init__(self, args: MokioMindConfig):
         super().__init__()
@@ -292,6 +294,33 @@ class Attention(nn.Module):
         # 在残差连接之前对融合的信息进行dropout之后在block的时候再进行残差连接
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
+# 6.FFN前馈神经网络
+class FeedForward(nn.Module):
+    def __init__(self, config: MokioMindConfig):
+        super().__init__()
+        if config.intermediate_size is None:
+            # 因为传统的FFN是采用两个线性层，d到4d和4d到d，总参数是8d的平方，这个是三个线性层，两个升维，一个降维，d到md，md到d
+            # 3md的平方，如果想让它们接近，m的值必须接近8/3
+            intermediate_size = int(config.hidden_size * 8 / 3)
+            # 这个是让维度对齐到64的整数倍并且向上取整，之所以这么做，是因为64的倍数GPU更好计算，例如原来维度是80，向上取64的整数倍直接变成128
+            config.intermediate_size = 64 * ((intermediate_size + 64 - 1) // 64)
+
+        self.gate_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias=False
+        )
+        self.up_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.dropout = nn.Dropout(config.dropout)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        # 在残差连接之前还需要进行dropout防止过拟合
+        return self.dropout(self.down_proj(gated))
    
 if __name__ == "__main__":
     x = torch.tensor([
